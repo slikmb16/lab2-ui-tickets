@@ -10,6 +10,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -17,6 +18,7 @@ from docx import Document
 from openpyxl import Workbook, load_workbook
 
 from app import logic, parsing, storage
+from app.web import create_app
 
 
 class TestTicketParsing(unittest.TestCase):
@@ -201,6 +203,31 @@ class TestResultsFileCreation(unittest.TestCase):
             wb = load_workbook(path)
             rows = list(wb.active.iter_rows(min_row=2, values_only=True))
             self.assertEqual(len(rows), 1)
+
+
+class TestMandatoryRequirements(unittest.TestCase):
+    def test_missing_input_files_return_clear_fatal_status(self):
+        """Без students.xlsx и tickets.docx приложение остаётся доступным."""
+        with tempfile.TemporaryDirectory() as d:
+            # Даже наличие старых копий в data/ не должно скрывать ошибку:
+            # по лабораторной входные файлы ожидаются в папке проекта.
+            os.mkdir(os.path.join(d, "data"))
+            open(os.path.join(d, "data", "students.xlsx"), "wb").close()
+            open(os.path.join(d, "data", "tickets.docx"), "wb").close()
+            response = create_app(d).test_client().get("/api/status")
+            data = response.get_json()
+            self.assertEqual(response.status_code, 200)
+            self.assertIn("students.xlsx", data["fatal"])
+            self.assertIn("tickets.docx", data["fatal"])
+
+    def test_locked_results_file_raises_friendly_error(self):
+        """Ошибка доступа к Excel превращается в контролируемую ошибку приложения."""
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "results.xlsx")
+            storage.ensure_results_file(path)
+            with patch("app.storage.load_workbook", side_effect=PermissionError("locked")):
+                with self.assertRaises(storage.ResultsFileLocked):
+                    storage.append_result(path, "ГрА", "Иванов", "Иван", 1, False, retries=1)
 
 
 if __name__ == "__main__":

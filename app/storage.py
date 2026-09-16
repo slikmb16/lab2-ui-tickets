@@ -26,10 +26,13 @@ def ensure_results_file(path: str) -> None:
     if os.path.exists(path):
         return
     wb = Workbook()
-    ws = wb.active
-    ws.title = "Результаты"
-    ws.append(HEADERS)
-    wb.save(path)
+    try:
+        ws = wb.active
+        ws.title = "Результаты"
+        ws.append(HEADERS)
+        wb.save(path)
+    finally:
+        wb.close()
     logger.info("Создан новый журнал результатов: %s", path)
 
 
@@ -42,22 +45,31 @@ def find_first_ticket(path: str, group: str, surname: str, name: str) -> Optiona
     if not os.path.exists(path):
         return None
 
-    wb = load_workbook(path, read_only=True, data_only=True)
-    ws = wb.active
-    result = None
-    for row in ws.iter_rows(min_row=2, values_only=True):
-        if row is None:
-            continue
-        row_group, row_surname, row_name, row_ticket = (row + (None,) * 4)[:4]
-        if (
-            str(row_group).strip() == group
-            and str(row_surname).strip() == surname
-            and str(row_name).strip() == name
-        ):
-            result = int(row_ticket)
-            break  # первая по порядку запись — файл только дописывается, порядок хронологический
-    wb.close()
-    return result
+    try:
+        wb = load_workbook(path, read_only=True, data_only=True)
+    except PermissionError as exc:
+        raise ResultsFileLocked(
+            "Файл results.xlsx открыт в Excel. Закройте его и повторите попытку."
+        ) from exc
+    try:
+        ws = wb.active
+        for row in ws.iter_rows(min_row=2, values_only=True):
+            if row is None:
+                continue
+            row_group, row_surname, row_name, row_ticket = (row + (None,) * 4)[:4]
+            if (
+                str(row_group).strip() == group
+                and str(row_surname).strip() == surname
+                and str(row_name).strip() == name
+            ):
+                # Некорректная старая строка не должна ронять приложение.
+                try:
+                    return int(row_ticket)
+                except (TypeError, ValueError):
+                    logger.warning("Пропущена строка с некорректным номером билета: %r", row)
+    finally:
+        wb.close()
+    return None
 
 
 def append_result(
@@ -89,6 +101,7 @@ def append_result(
 
     last_error: Optional[Exception] = None
     for attempt in range(1, retries + 1):
+        wb = None
         try:
             wb = load_workbook(path)
             ws = wb.active
@@ -96,7 +109,7 @@ def append_result(
             wb.save(path)
             logger.info("Строка добавлена в журнал: %s", row)
             return
-        except PermissionError as exc:
+        except (PermissionError, OSError) as exc:
             last_error = exc
             logger.warning(
                 "results.xlsx недоступен для записи (попытка %d/%d): %s",
@@ -104,6 +117,9 @@ def append_result(
             )
             if attempt < retries:
                 time.sleep(retry_delay_sec)
+        finally:
+            if wb is not None:
+                wb.close()
 
     raise ResultsFileLocked(
         "Файл results.xlsx открыт в другой программе (например, Excel). "
